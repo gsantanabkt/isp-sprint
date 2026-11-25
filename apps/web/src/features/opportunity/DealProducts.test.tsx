@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { emptyEconInput, type EconInput } from '@isp/domain';
 import { DealProducts } from './DealProducts';
 import { api } from '../../lib/api';
+import { setMoneyHidden } from '../../lib/privacy';
 import type { Opportunity } from '../../lib/types';
 
 vi.mock('../../lib/api', async (original) => ({ ...await original<typeof import('../../lib/api')>(), api: vi.fn() }));
@@ -12,10 +13,10 @@ const { toast } = vi.hoisted(() => ({ toast: vi.fn() }));
 vi.mock('../../components/ui/overlay', async (original) => ({ ...await original<typeof import('../../components/ui/overlay')>(), useToast: () => toast }));
 vi.mock('./DeliveryAddresses', () => ({ NewDeliveryAddressModal: () => null, addressLine: () => 'Endereço' }));
 const clients: QueryClient[] = [];
-afterEach(() => { cleanup(); clients.splice(0).forEach((c) => c.clear()); vi.mocked(api).mockReset(); toast.mockReset(); });
+afterEach(() => { cleanup(); clients.splice(0).forEach((c) => c.clear()); vi.mocked(api).mockReset(); toast.mockReset(); setMoneyHidden(true); });
 const kinds = ['venda', 'servico', 'recorrencia', 'locacao'] as const;
 const initial: EconInput = { ...emptyEconInput(), paybackMonths: 6, b2g: { netTargetBp: 3000 }, capex: kinds.map((kind) => ({ description: 'Investimento ' + kind, qtyMilli: 1000, unitCents: 800000, kind, impact: 'material' })), opex: [{ description: 'Operação recorrente', qtyMilli: 1000, unitCents: 10000, kind: 'recorrencia', impact: 'operacional' }] };
-function setup(hidden = false, onlyMonthly = false, bid = false) {
+function setup(hidden = false, onlyMonthly = false, bid = false, saleKind?: Opportunity['saleKind']) {
   const requests: { items: { dealKind: string; priceDefined: boolean; unitCents: number }[]; economics?: EconInput; bidMode?: string; bidGlobalCents?: number }[] = [];
   const selected = onlyMonthly ? kinds.filter((k) => k === 'recorrencia') : kinds;
   const items = selected.map((dealKind, position) => ({ id: String(position), description: 'Produto ' + dealKind, unit: 'un', qtyMilli: 1000, unitCents: 0, priceDefined: false, discountCents: 0, surchargeCents: 0, notes: null, bidUnitCents: null, fiscalDocTypeId: 'doc', dealKind }));
@@ -29,10 +30,28 @@ function setup(hidden = false, onlyMonthly = false, bid = false) {
     return { items: [] } as never;
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }); clients.push(client);
-  render(<QueryClientProvider client={client}><DealProducts opp={{ id: 'opp', branchId: 'branch' } as Opportunity} /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><DealProducts opp={{ id: 'opp', branchId: 'branch', saleKind } as Opportunity} /></QueryClientProvider>);
   return requests;
 }
 describe('produtos e custos por tipo de negócio', () => {
+  it('mostra e salva o preço aceito no Consumo de contrato, com inferência só no serviço', async () => {
+    setMoneyHidden(false);
+    const requests = setup(false, false, false, 'consumo_contrato');
+    const sale = await screen.findByRole('region', { name: 'Negociação Venda' });
+    const recurrence = screen.getByRole('region', { name: 'Negociação Recorrência' });
+    expect(within(sale).getByText('Repasse · sem inferência')).toBeTruthy();
+    expect(within(recurrence).getByRole('columnheader', { name: 'Preço unitário de venda' })).toBeTruthy();
+    expect(screen.queryByText('Preço sugerido da cesta')).toBeNull();
+    expect(vi.mocked(api).mock.calls.some(([url]) => url === '/cost-items')).toBe(false);
+
+    fireEvent.change(within(recurrence).getByLabelText('Preço unitário de venda do item 1'), { target: { value: '200,00' } });
+    fireEvent.change(within(recurrence).getByLabelText('Quantidade do custo 1'), { target: { value: '5' } });
+    expect(within(recurrence).getByText(/350,00\/mês \(35%\)/)).toBeTruthy();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Salvar produtos e consumo' })[0]!);
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]!.economics?.capex.find((row) => row.kind === 'recorrencia')).toMatchObject({ qtyMilli: 5000, unitCents: 20000 });
+    expect(requests[0]!.items.every((item) => !item.priceDefined && item.unitCents === 0)).toBe(true);
+  });
   it('separa Instalação, Venda, Aluguel e Recorrência; Quando distingue único e mensal', async () => {
     setup();
     const installation = await screen.findByRole('region', { name: 'Negociação Instalação' });

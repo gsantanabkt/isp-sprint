@@ -14,7 +14,7 @@ import { Calculator, ClipboardPaste, FileSpreadsheet, Plus, Trash2 } from 'lucid
 import { FISCAL_KINDS, FISCAL_KIND_LABELS, type FiscalKind } from '@isp/shared';
 import {
   COST_CATEGORIES, COST_CATEGORY_LABELS, COST_CATEGORY_SHORT, ECON_VERDICT_LABELS, ITEM_UNITS, ITEM_UNIT_LABELS, SECTION_KINDS, SECTION_KIND_LABELS,
-  buildModel, categoryOfImpact, costQty, isMonthlySection, parseCostTable, parseMoney, parseQty, sectionCostTotal, sectionsEngine, sectionsFromLegacy,
+  buildModel, contractConsumption, categoryOfImpact, costQty, isMonthlySection, parseCostTable, parseMoney, parseQty, sectionCostTotal, sectionsEngine, sectionsFromLegacy,
   type CostCategory, type CostFrequency, type CostImpact, type DealKind, type DealSection, type EconInput, type EconItem, type EconResult, type EconSettings, type EconVerdict,
   type FinOverride, type FiscalArgs, type ItemUnit, type SectionCost, type SectionKind, type SectionOutcome,
 } from '@isp/domain';
@@ -25,6 +25,7 @@ import type { Opportunity } from '../../lib/types';
 import { Button, Chip, ErrorState, Input, LoadingRows, Notice, Select } from '../../components/ui/primitives';
 import { Modal, useToast } from '../../components/ui/overlay';
 import { LineChart } from '../../components/charts/charts';
+import { ContractConsumptionSummary } from './ContractConsumptionSummary';
 import { errMsg } from '../contracts/shared';
 
 // ------------------------------------------------------------------ tipos e utilitários
@@ -101,6 +102,7 @@ function liveResult(d: EconData | undefined, model: ReturnType<typeof buildModel
 
 // ------------------------------------------------------------------ aba Produtos e serviços
 export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
+  const consumption = opp.saleKind === 'consumo_contrato';
   const toast = useToast();
   const qc = useQueryClient();
   const itemsQ = useQuery({ queryKey: ['opp-items', opp.id], queryFn: () => api<ItemsData>(`/opportunities/${opp.id}/items`) });
@@ -108,7 +110,7 @@ export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
   const docsQ = useQuery({ queryKey: ['fiscal-docs'], queryFn: () => api<{ items: Doc[] }>('/fiscal-docs'), staleTime: 60_000 });
   const prodQ = useQuery({ queryKey: ['product-catalog'], queryFn: () => api<{ items: ProductCat[] }>('/product-catalog'), staleTime: 60_000 });
   const finance = econ.data ? !econ.data.financeHidden : false;
-  const costQ = useQuery({ queryKey: ['cost-items'], queryFn: () => api<{ items: CostCat[] }>('/cost-items'), staleTime: 60_000, enabled: finance });
+  const costQ = useQuery({ queryKey: ['cost-items'], queryFn: () => api<{ items: CostCat[] }>('/cost-items'), staleTime: 60_000, enabled: finance && !consumption });
   const plans = useLookups().data?.plans ?? [];
   const docs = useMemo(() => (docsQ.data?.items ?? []).filter((d) => !opp.branchId || d.branchId === opp.branchId), [docsQ.data, opp.branchId]);
   const products = prodQ.data?.items ?? [];
@@ -137,13 +139,18 @@ export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
   })), [form, docs]);
   // a prévia só recalcula quando o conteúdo muda e a pessoa para de digitar (chave em texto: nada de recálculo por re-render)
   const calcKey = useDebounced(useMemo(() => JSON.stringify({ sections, liveItems }), [sections, liveItems]), 700);
-  const live = useMemo(() => { if (!finance) return null; const x = JSON.parse(calcKey) as { sections: DealSection[]; liveItems: EconItem[] }; return liveResult(econ.data, model, x.sections, x.liveItems); }, [finance, econ.data, model, calcKey]);
+  const live = useMemo(() => { if (!finance || consumption) return null; const x = JSON.parse(calcKey) as { sections: DealSection[]; liveItems: EconItem[] }; return liveResult(econ.data, model, x.sections, x.liveItems); }, [finance, consumption, econ.data, model, calcKey]);
+
+  const consumptionPreview = consumption && econ.data?.settings && form
+    && !form.some((f) => f.costs.some((c) => (c.description.trim() || c.value.trim()) && (!c.value.trim() || !costQty(c.qty) || parseMoney(c.value) == null)))
+    ? contractConsumption({ ...econ.data.input, pricingMode: undefined, sections }, liveItems, econ.data.settings) : null;
 
   const updateCosts = useCallback((k: string, fn: (c: CostRow[]) => CostRow[]) => setForm((cur) => (cur ?? []).map((f) => (f.key === k ? { ...f, costs: fn(f.costs) } : f))), []);
   const save = useMutation({
     mutationFn: async () => {
       const fs = form!;
       const items = itemInputs(fs);
+      if (consumption && finance && fs.some((f) => f.costs.some((c) => c.description.trim() && !c.value.trim()))) throw new Error('Informe o preço unitário de venda dos itens.');
       if (items.some((i) => !i.qtyMilli)) throw new Error('Confira a quantidade dos produtos.');
       if (fs.some((f) => f.costs.some((c) => (c.description.trim() || c.value.trim()) && (c.description.trim().length < 2 || parseMoney(c.value) == null || !costQty(c.qty))))) throw new Error('Confira descrição, quantidade e valor dos custos.');
       const o = await api<Opportunity>(`/opportunities/${opp.id}/items`, { method: 'PUT', body: { rowVersion: itemsQ.data!.rowVersion, items } });
@@ -181,7 +188,7 @@ export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
           <h2 className="text-md font-bold text-ink">Produtos e serviços</h2>
           <p className="max-w-2xl text-sm text-muted">Separe a negociação por tipo de negócio. Em cada um, os produtos e os custos que a viabilidade econômica usa.</p>
         </div>
-        {editable && <Button variant="primary" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate()}>Salvar produtos e custos</Button>}
+        {editable && <Button variant="primary" disabled={!dirty && !(consumption && finance && econ.data?.stale && econ.data.settings)} loading={save.isPending} onClick={() => save.mutate()}>Salvar produtos e custos</Button>}
       </div>
       {finance && econ.data && !econ.data.settings && <Notice tone="warning">A empresa ainda não informou os parâmetros da viabilidade (Configurações → Viabilidade): os produtos são salvos, os custos e o cálculo esperam os parâmetros.</Notice>}
 
@@ -242,8 +249,9 @@ export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
               {f.items.length > 0 && editable && <button type="button" className="text-xs font-semibold text-primary hover:underline" onClick={() => setValues({ ...values, [f.key]: !values[f.key] })}>{showValues ? 'Ocultar valores' : 'Editar valores'}</button>}
             </div>
 
-            {finance && <SectionCosts secKey={f.key} kind={f.kind} costs={f.costs} si={si} editable={editable} catalog={costCat} update={updateCosts} />}
+            {finance && <SectionCosts consumption={consumption} secKey={f.key} kind={f.kind} costs={f.costs} si={si} editable={editable} catalog={consumption ? [] : costCat} update={updateCosts} />}
 
+            {finance && consumption && econ.data?.settings && <div className="border-t border-line bg-surface-2 px-4 py-2"><ContractConsumptionSummary result={consumptionPreview} section={si} /></div>}
             {finance && out && (
               <div className="flex flex-wrap border-t border-line bg-surface-2">
                 <Kpi label={f.priceCents != null ? 'Preço praticado' : 'Preço ideal'} value={out.priceCents != null ? `${fmtBRL(out.priceCents)}${monthly ? '/mês' : ''}` : '—'} />
@@ -263,7 +271,7 @@ export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
         </button>
       )}
       <datalist id="deal-products">{products.map((c) => <option key={c.id} value={c.description} />)}{plans.filter((p) => !products.some((c) => c.description.toLowerCase() === p.name.toLowerCase())).map((p) => <option key={p.id} value={p.name} />)}</datalist>
-      {finance && <p className="text-xs text-muted">Na recorrência e no aluguel, custo único (matéria-prima, mão de obra da entrega) vira investimento e só o mensal deduz do preço. Na venda, tudo deduz direto.</p>}
+      {finance && !consumption && <p className="text-xs text-muted">Na recorrência e no aluguel, custo único (matéria-prima, mão de obra da entrega) vira investimento e só o mensal deduz do preço. Na venda, tudo deduz direto.</p>}
       {dirty && editable && <div className="flex justify-end"><Button variant="primary" loading={save.isPending} onClick={() => save.mutate()}>Salvar produtos e custos</Button></div>}
     </section>
   );
@@ -273,7 +281,7 @@ const Kpi = ({ label, value }: { label: string; value: string }) => <div classNa
 
 /** Custos da seção: dedução, descrição (catálogo), único/mensal, qtd. e valor; colar do Excel ou importar a planilha técnica. */
 /** Custos da seção (memorizado): digitar num produto ou em outra seção não redesenha a tabela de custos. */
-const SectionCosts = memo(function SectionCosts({ secKey, kind, costs, si, editable, catalog, update }: { secKey: string; kind: SectionKind; costs: CostRow[]; si: number; editable: boolean; catalog: CostCat[]; update: (k: string, fn: (c: CostRow[]) => CostRow[]) => void }) {
+const SectionCosts = memo(function SectionCosts({ consumption, secKey, kind, costs, si, editable, catalog, update }: { consumption: boolean; secKey: string; kind: SectionKind; costs: CostRow[]; si: number; editable: boolean; catalog: CostCat[]; update: (k: string, fn: (c: CostRow[]) => CostRow[]) => void }) {
   const f = { kind, costs };
   const monthly = isMonthlySection(kind);
   const setCosts = (next: CostRow[]) => update(secKey, () => next);
@@ -299,7 +307,7 @@ const SectionCosts = memo(function SectionCosts({ secKey, kind, costs, si, edita
     setCosts([...f.costs.filter((c) => c.description.trim() || c.value.trim()), ...rows]);
     const sum = (fr: CostFrequency) => r.lines.filter((_, k) => rows[k]!.frequency === fr).reduce((t, x) => t + sectionCostTotal(x), 0);
     const loose = rows.filter((x) => !x.category).length;
-    setMsg({ text: `${from}: ${rows.length} custo(s) incluído(s): ${fmtBRL(sum('unico'))} únicos${monthly ? ` e ${fmtBRL(sum('mensal'))} mensais` : ''}.${loose ? ` ${loose} sem dedução fica(m) fora do cálculo até ser(em) classificado(s).` : ''}${r.errors.length ? ` ${r.errors.length} linha(s) ignorada(s): ${r.errors.slice(0, 3).map((e) => `linha ${e.row} (${e.message})`).join('; ')}.` : ''} Confira e salve.`, bad: r.errors.length > 0 || loose > 0 });
+    setMsg({ text: `${from}: ${rows.length} custo(s) incluído(s): ${fmtBRL(sum('unico'))} únicos${monthly ? ` e ${fmtBRL(sum('mensal'))} mensais` : ''}.${loose ? ` ${loose} sem dedução fica(m) fora ${consumption ? 'da inferência' : 'do cálculo'} até ser(em) classificado(s).` : ''}${r.errors.length ? ` ${r.errors.length} linha(s) ignorada(s): ${r.errors.slice(0, 3).map((e) => `linha ${e.row} (${e.message})`).join('; ')}.` : ''} Confira e salve.`, bad: r.errors.length > 0 || loose > 0 });
   };
   const onFile = async (file: File) => {
     try {
@@ -311,7 +319,7 @@ const SectionCosts = memo(function SectionCosts({ secKey, kind, costs, si, edita
   return (
     <div className="border-t border-line px-4 pb-3 pt-2.5">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <h4 className="text-sm font-semibold text-ink">Custos desta negociação</h4>
+        <h4 className="text-sm font-semibold text-ink">{consumption ? 'Itens para consumo do contrato' : 'Custos desta negociação'}</h4>
         <span className="flex-1" />
         {editable && <>
           <Button size="sm" icon={<ClipboardPaste className="h-4 w-4" />} onClick={() => setPasting(true)}>Colar do Excel</Button>
@@ -325,12 +333,12 @@ const SectionCosts = memo(function SectionCosts({ secKey, kind, costs, si, edita
       {f.costs.length > 0 && (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-sm" aria-label={`Custos do tipo de negócio ${si + 1}`}>
-            <thead className="bg-surface-2 text-left text-xs text-muted"><tr><th className="w-[180px] px-2 py-2 font-medium">Dedução</th><th className="px-2 py-2 font-medium">Descrição</th><th className="w-[120px] px-2 py-2 font-medium">Quando</th><th className="w-[90px] px-2 py-2 font-medium">Qtd.</th><th className="w-[140px] px-2 py-2 text-right font-medium">Valor unitário</th><th className="w-[120px] px-2 py-2 text-right font-medium">Total</th><th className="w-[36px]" /></tr></thead>
+            <thead className="bg-surface-2 text-left text-xs text-muted"><tr><th className="w-[180px] px-2 py-2 font-medium">Dedução</th><th className="px-2 py-2 font-medium">Descrição</th><th className="w-[120px] px-2 py-2 font-medium">Quando</th><th className="w-[90px] px-2 py-2 font-medium">Qtd.</th><th className="w-[140px] px-2 py-2 text-right font-medium">{consumption ? 'Preço unitário de venda' : 'Valor unitário'}</th><th className="w-[120px] px-2 py-2 text-right font-medium">Total</th><th className="w-[36px]" /></tr></thead>
             <tbody>{f.costs.map((c, i) => <CostLine key={c.key} c={c} i={i} si={si} monthly={monthly} editable={editable} listId={listId} set={set} onName={onName} remove={remove} />)}</tbody>
           </table>
         </div>
       )}
-      {editable && <button type="button" className="mt-2 inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:underline" onClick={() => setCosts([...f.costs, blankCost(f.kind)])}><Plus className="h-4 w-4 border border-primary" aria-hidden />Adicionar custo</button>}
+      {editable && <button type="button" className="mt-2 inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:underline" onClick={() => setCosts([...f.costs, blankCost(f.kind)])}><Plus className="h-4 w-4 border border-primary" aria-hidden />{consumption ? 'Adicionar item de consumo' : 'Adicionar custo'}</button>}
       <datalist id={listId}>{catalog.filter((c) => monthly || c.kind === 'investimento').map((c) => <option key={c.id} value={c.name}>{c.unitCents != null ? `${money(c.unitCents)} · ${c.kind === 'mensal' ? 'mensal' : 'único'}` : ''}</option>)}</datalist>
       <Modal open={pasting} onClose={() => setPasting(false)} title="Colar do Excel: custos" size="lg"
         footer={<><Button onClick={() => setPasting(false)}>Cancelar</Button><Button variant="primary" disabled={!pasteText.trim()} onClick={() => { addTable(pasteText.split(/\r?\n/).map((l) => l.split('\t')), 'Colado'); setPasting(false); setPasteText(''); }}>Incluir custos</Button></>}>

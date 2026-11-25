@@ -162,7 +162,8 @@ export const approvalRoutes = [
         if (!fresh || !ctx.settings) throw unprocessable('A empresa ainda não informou os parâmetros da viabilidade econômica (Configurações → Viabilidade).');
         if (isStale(er, fresh)) throw unprocessable('A viabilidade econômica mudou desde que foi salva (produtos, tributos ou parâmetros). Abra a aba Viabilidade econômica, confira e salve de novo antes de pedir aprovação.');
         if (er.withReservations) throw unprocessable('Viabilidade econômica: todos os produtos precisam de documento fiscal com tributos vigentes cadastrados na filial antes de pedir aprovação.');
-        if (ctx.settings.blockOutsidePolicy && er.verdict !== 'viavel') {
+        if (er.contractConsumption && !er.contractConsumption.groups.length) throw unprocessable('Informe os itens para consumo do contrato antes de pedir aprovação.');
+        if (!er.contractConsumption && ctx.settings.blockOutsidePolicy && er.verdict !== 'viavel') {
           const pb = er.kpi?.paybackMonths;
           throw unprocessable(({
             viavel: 'Viabilidade econômica dentro da faixa.',

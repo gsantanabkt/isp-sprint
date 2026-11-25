@@ -4,7 +4,7 @@
  * Com timbrado na filial, cada página é desenhada sobre ele, dentro das margens configuradas.
  */
 import { PDFDocument, StandardFonts, rgb, type PDFEmbeddedPage, type PDFFont, type PDFImage, type PDFPage } from 'pdf-lib';
-import { ECON_VERDICT_LABELS, econDre, econHeadline, econMemory, type EconResult } from '@isp/domain';
+import { DEAL_KIND_LABELS, ECON_VERDICT_LABELS, econDre, econHeadline, econMemory, type EconResult } from '@isp/domain';
 import { TAX_REGIME_LABELS, type TaxRegime } from '@isp/shared';
 import { brl } from './email';
 import { safeText, wrap } from './proposals';
@@ -35,11 +35,11 @@ function summary(run: Run, h: RunHeader) {
       ['Conta', h.account],
       ['Emitente', emitterText(emitter)],
       ['Calculado em', `${when(run.createdAt)} por ${run.actorName ?? 'sistema'}${run.reason === 'ganha' ? ' (fechamento)' : ''}`],
-      ['Tipo', r.mode === 'recorrente' ? `Contrato mensal, ${r.term.N} meses` : `Pagamento único, recebe no mês ${r.term.d}`],
+      ['Tipo', r.contractConsumption ? 'Consumo de contrato' : r.mode === 'recorrente' ? `Contrato mensal, ${r.term.N} meses` : `Pagamento único, recebe no mês ${r.term.d}`],
       ['Segmento', r.publicSector ? 'Público' : 'Privado'],
-      ['Resultado', ECON_VERDICT_LABELS[r.verdict]],
+      ['Resultado', r.contractConsumption ? 'Inferência de custo de serviço' : ECON_VERDICT_LABELS[r.verdict]],
     ] as [string, string][],
-    kpis: [
+    kpis: r.contractConsumption ? consumptionRows(r.contractConsumption) : [
       ['Preço', r.priceCents == null ? '—' : `${money(r.priceCents)}${r.mode === 'recorrente' ? '/mês' : ''}`],
       ['Preço mínimo', r.floor.minCents == null ? '—' : money(r.floor.minCents)],
       ['Preço mínimo sugerido', r.suggestedMinCents == null ? '—' : money(r.suggestedMinCents)],
@@ -55,12 +55,27 @@ function summary(run: Run, h: RunHeader) {
   };
 }
 
+function consumptionRows(result: NonNullable<EconResult['contractConsumption']>): [string, string][] {
+  return [['Taxa de inferência', pct(result.rateBp / 100)], ...result.groups.flatMap((group): [string, string][] => {
+    const label = group.kind ? DEAL_KIND_LABELS[group.kind] : 'Sem tipo de negócio';
+    return [
+      [`${label} · valor único do consumo`, group.oneTimeCents == null ? '—' : money(group.oneTimeCents)],
+      [`${label} · valor mensal do consumo`, group.monthlyCents == null ? '—' : `${money(group.monthlyCents)}/mês`],
+      [`${label} · inferência`, group.inferenceCents == null ? 'Não aplicável' : `${money(group.inferenceCents)}${group.inferenceMonthly ? '/mês' : ''}`],
+    ];
+  })];
+}
+
 const csvCell = (v: string | number | null | undefined) => { const t = v == null ? '' : String(v); return /[;"\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
 const cents = (c: number | null | undefined) => (c == null ? '' : (c / 100).toFixed(2).replace('.', ','));
 
 export function buildEconCsv(run: Run, h: RunHeader) {
   const r = run.result;
   const sm = summary(run, h);
+  if (r.contractConsumption) {
+    const rows = [['Viabilidade econômica'], ...sm.head, [], ...sm.kpis, [], [sm.footer]];
+    return `﻿${rows.map((row) => row.map(csvCell).join(';')).join('\r\n')}\r\n`;
+  }
   const rows: (string | number | null)[][] = [
     ['Viabilidade econômica'], ...sm.head, [], ...sm.kpis, [],
     ['Memória de cálculo', 'Fórmula', 'Valor'],
@@ -125,9 +140,9 @@ export async function buildEconPdf(run: Run, h: RunHeader, letterhead?: Letterhe
   text('Viabilidade econômica', M, 18, bold); y -= 26;
   for (const [k, v] of sm.head) { need(14); text(k, M, 9, font, muted); for (const [i, l] of wrap(font, v, 10, W - 2 * M - 110).entries()) { if (i) { y -= 13; need(14); } text(l, M + 110, 10, k === 'Resultado' ? bold : font); } y -= 14; }
   y -= 4;
-  para(econHeadline(r, (c) => (c == null ? '—' : money(c))), 10.5, font);
+  if (!r.contractConsumption) para(econHeadline(r, (c) => (c == null ? '—' : money(c))), 10.5, font);
 
-  section('Indicadores');
+  section(r.contractConsumption ? 'Valor do consumo e inferência' : 'Indicadores');
   {
     // duas colunas: indicador à esquerda, número alinhado à direita; linhas alternadas para leitura
     const valW = (W - 2 * M) * 0.5, labW = W - 2 * M - valW - 12;
@@ -139,6 +154,11 @@ export async function buildEconPdf(run: Run, h: RunHeader, letterhead?: Letterhe
       for (let i = 0; i < n; i++) { if (ls[i]) text(ls[i]!, M + 6, 9.5, font, muted); if (vs[i]) right(vs[i]!, W - M - 6, 10, i === 0 ? bold : font); y -= 13; }
       y -= 5;
     });
+  }
+
+  if (r.contractConsumption) {
+    para(sm.footer, 8, font, muted);
+    return Buffer.from(await doc.save());
   }
 
   // memória de cálculo: passo, linha, fórmula (miúda) e valor à direita

@@ -17,7 +17,7 @@ const LABEL: Record<string, string> = { pendente: 'Aguardando decisão', aprovad
 
 export const useApprovalCount = () => useQuery({ queryKey: ['approvals', 'pendentes'], queryFn: () => api<{ items: Item[]; toDecide: number; myLevelLabel: string }>('/approvals?status=pendentes'), refetchInterval: 60_000 });
 
-type EconPending = { opportunityId: string; code: number; title: string; account: string; submittedAt: string; submittedByName: string | null; verdict: EconVerdict; priceCents: number | null; mode: 'recorrente' | 'pontual'; paybackMonths: number | null; marginPct: number | null; mine: boolean };
+type EconPending = { contractConsumptionMode?: boolean; opportunityId: string; code: number; title: string; account: string; submittedAt: string; submittedByName: string | null; verdict: EconVerdict; priceCents: number | null; mode: 'recorrente' | 'pontual'; paybackMonths: number | null; marginPct: number | null; mine: boolean };
 
 /** Viabilidades econômicas enviadas para a gestão decidir (só aparece para quem pode aprovar). */
 function EconomicsQueue() {
@@ -34,10 +34,10 @@ function EconomicsQueue() {
             <tr key={r.opportunityId} className="cursor-pointer border-t border-line hover:bg-surface-2/60" onClick={() => nav(`/opportunities/${r.opportunityId}?aba=viabilidade`)}>
               <td className="px-4 py-2.5"><span className="font-semibold text-ink">OP-{r.code}</span><span className="block text-xs text-muted">{r.title}</span></td>
               <td className="px-4 py-2.5 text-ink">{r.account}</td>
-              <td className="num px-4 py-2.5 text-ink">{fmtBRL(r.priceCents)}{r.mode === 'recorrente' ? '/mês' : ''}</td>
+              <td className="num px-4 py-2.5 text-ink">{fmtBRL(r.priceCents)}{!r.contractConsumptionMode && r.mode === 'recorrente' ? '/mês' : ''}</td>
               <td className="num px-4 py-2.5 text-ink">{r.marginPct == null ? '—' : `${r.marginPct.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%`}</td>
               <td className="num px-4 py-2.5 text-ink">{r.paybackMonths == null ? '—' : `${r.paybackMonths.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} meses`}</td>
-              <td className="px-4 py-2.5"><Chip tone={r.verdict === 'viavel' ? 'green' : 'red'}>{ECON_VERDICT_LABELS[r.verdict]}</Chip></td>
+              <td className="px-4 py-2.5"><Chip tone={r.contractConsumptionMode ? 'neutral' : r.verdict === 'viavel' ? 'green' : 'red'}>{r.contractConsumptionMode ? 'Consumo de contrato' : ECON_VERDICT_LABELS[r.verdict]}</Chip></td>
               <td className="px-4 py-2.5 text-text">{r.submittedByName ?? '—'}{r.mine && <Chip className="ml-1">você enviou</Chip>}<span className="block text-xs text-muted">{fmtDateTime(r.submittedAt)}</span></td>
             </tr>
           ))}

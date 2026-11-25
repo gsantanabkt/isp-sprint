@@ -6,7 +6,7 @@
  */
 import { createHash } from 'node:crypto';
 import { and, asc, desc, eq, inArray, lte, sql } from 'drizzle-orm';
-import { impactOfCategory, sectionsEngine, type SectionCost, b2gFromEconomics, defaultModel, emptyEconInput, financeEngine, type DealKind, fiscalDocRates, itemTotal, type CostImpact, type CostLine, type EconInput, type EconItem, type EconResult, type EconSettings, type FiscalTax, type FiscalEnvelope, type FiscalEnvelopeValues, docTaxesForYear } from '@isp/domain';
+import { applyFiscalEnvelope, lotOfKind, contractConsumptionResult, impactOfCategory, sectionsEngine, type SectionCost, b2gFromEconomics, defaultModel, emptyEconInput, financeEngine, type DealKind, fiscalDocRates, itemTotal, type CostImpact, type CostLine, type EconInput, type EconItem, type EconResult, type EconSettings, type FiscalTax, type FiscalEnvelope, type FiscalEnvelopeValues, docTaxesForYear } from '@isp/domain';
 import type { DbOrTx } from '../db/client';
 import * as s from '../db/schema';
 import { unprocessable } from '../http/errors';
@@ -113,7 +113,7 @@ export async function economicsContext(db: DbOrTx, opp: Opp) {
   const input = saved ? ({ ...emptyEconInput(), ...(saved.input as Partial<EconInput>) } as EconInput) : emptyEconInput();
   return {
     settings: version?.settings ?? null, settingsVersion: version ? { id: version.id, validFrom: version.validFrom } : null,
-    items: econItems, publicSector, input,
+    items: econItems, publicSector, input, contractConsumptionMode: opp.saleKind === 'consumo_contrato',
     /** emitente: a filial da venda com CNPJ, regime e município (contexto fiscal) */
     emitter: branch ?? null,
     saved: saved ? { updatedAt: saved.updatedAt, updatedBy: saved.updatedBy } : null, savedResult: saved ? (saved.result as unknown as EconResult) : null,
@@ -130,6 +130,14 @@ export type EconContext = Awaited<ReturnType<typeof economicsContext>>;
 export const computeEconomics = (ctx: EconContext, input?: EconInput) => {
   if (!ctx.settings) return null;
   const inp = input ?? ctx.input;
+  if (ctx.contractConsumptionMode) {
+    const result = contractConsumptionResult(inp, ctx.items, ctx.settings, ctx.publicSector);
+    // A conferência fiscal continua disponível para a decisão, sem apurar preço ou tributos do consumo.
+    const { args: { items } } = applyFiscalEnvelope({ input: inp, items: ctx.items, settings: ctx.settings, publicSector: ctx.publicSector, fiscal: ctx.fiscal });
+    const lot = (item: EconItem) => lotOfKind(item.kind ?? (inp.mode === 'recorrente' ? 'recorrencia' : 'venda'));
+    const documented = new Set(items.filter((item) => item.doc?.complete).map(lot));
+    return { ...result, withReservations: !items.length || items.some((item) => !documented.has(lot(item))) };
+  }
   // negociação por seções (tipos de negócio): cada seção no motor e a visão geral consolidada
   if (inp.sections?.length && inp.pricingMode !== 'global') return sectionsEngine({ input: inp, items: ctx.items, settings: ctx.settings, publicSector: ctx.publicSector, model: ctx.model, fiscal: ctx.fiscal });
   const r = financeEngine({ input: inp, items: ctx.items, settings: ctx.settings, publicSector: ctx.publicSector, model: ctx.model, fiscal: ctx.fiscal });
@@ -147,6 +155,9 @@ export function b2gOf(ctx: EconContext, inp: EconInput, r: EconResult) {
  */
 export function isStale(saved: EconResult, fresh: EconResult | null) {
   if (!fresh) return true;
+  if (saved.contractConsumption || fresh.contractConsumption) {
+    return saved.engineVersion !== fresh.engineVersion || saved.withReservations !== fresh.withReservations || stableStringify(saved.contractConsumption) !== stableStringify(fresh.contractConsumption);
+  }
   const savedKey = saved.model?.key ?? defaultModel().key;
   return savedKey !== (fresh.model?.key ?? defaultModel().key) || saved.engineVersion !== fresh.engineVersion || saved.verdict !== fresh.verdict || saved.priceCents !== fresh.priceCents || saved.floor?.minCents !== fresh.floor.minCents
     || saved.recommendedCents !== fresh.recommendedCents || (saved.kpi?.contributionCents ?? null) !== (fresh.kpi?.contributionCents ?? null)
@@ -179,7 +190,7 @@ export async function snapshotEconomicsOnWon(db: DbOrTx, opp: Opp, actorId: stri
 }
 
 export async function economicsHistory(db: DbOrTx, tenantId: string, opportunityId: string) {
-  return db.select({ id: s.opportunityEconomicsSnapshots.id, reason: s.opportunityEconomicsSnapshots.reason, createdAt: s.opportunityEconomicsSnapshots.createdAt, actorName: s.users.name, engineVersion: s.opportunityEconomicsSnapshots.engineVersion, sha256: s.opportunityEconomicsSnapshots.sha256, verdict: sql<string>`${s.opportunityEconomicsSnapshots.result}->>'verdict'`, priceCents: sql<number | null>`(${s.opportunityEconomicsSnapshots.result}->>'priceCents')::bigint` })
+  return db.select({ id: s.opportunityEconomicsSnapshots.id, reason: s.opportunityEconomicsSnapshots.reason, createdAt: s.opportunityEconomicsSnapshots.createdAt, actorName: s.users.name, engineVersion: s.opportunityEconomicsSnapshots.engineVersion, contractConsumptionMode: sql<boolean>`${s.opportunityEconomicsSnapshots.result} ? 'contractConsumption'`, sha256: s.opportunityEconomicsSnapshots.sha256, verdict: sql<string>`${s.opportunityEconomicsSnapshots.result}->>'verdict'`, priceCents: sql<number | null>`(${s.opportunityEconomicsSnapshots.result}->>'priceCents')::bigint` })
     .from(s.opportunityEconomicsSnapshots).leftJoin(s.users, eq(s.users.id, s.opportunityEconomicsSnapshots.actorId))
     .where(and(eq(s.opportunityEconomicsSnapshots.tenantId, tenantId), eq(s.opportunityEconomicsSnapshots.opportunityId, opportunityId)))
     .orderBy(desc(s.opportunityEconomicsSnapshots.createdAt)).limit(20);
@@ -195,7 +206,7 @@ export type EconStatus = keyof typeof ECON_STATUS_LABELS;
  */
 export async function econStatus(db: DbOrTx, tenantId: string, opportunityId: string) {
   const [snap] = await db.select({ id: s.opportunityEconomicsSnapshots.id, createdAt: s.opportunityEconomicsSnapshots.createdAt }).from(s.opportunityEconomicsSnapshots)
-    .where(and(eq(s.opportunityEconomicsSnapshots.tenantId, tenantId), eq(s.opportunityEconomicsSnapshots.opportunityId, opportunityId), eq(s.opportunityEconomicsSnapshots.reason, 'salvo')))
+    .where(and(eq(s.opportunityEconomicsSnapshots.tenantId, tenantId), eq(s.opportunityEconomicsSnapshots.opportunityId, opportunityId), sql`(${s.opportunityEconomicsSnapshots.reason} = 'salvo' or (${s.opportunityEconomicsSnapshots.reason} = 'produtos_e_custos' and ${s.opportunityEconomicsSnapshots.result} ? 'contractConsumption'))`))
     .orderBy(desc(s.opportunityEconomicsSnapshots.createdAt)).limit(1);
   const decisions = await db.select({ id: s.opportunityEconDecisions.id, snapshotId: s.opportunityEconDecisions.snapshotId, action: s.opportunityEconDecisions.action, reason: s.opportunityEconDecisions.reason, actorId: s.opportunityEconDecisions.actorId, actorName: s.users.name, createdAt: s.opportunityEconDecisions.createdAt })
     .from(s.opportunityEconDecisions).leftJoin(s.users, eq(s.users.id, s.opportunityEconDecisions.actorId))

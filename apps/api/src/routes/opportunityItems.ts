@@ -72,6 +72,7 @@ export const opportunityItemRoutes = [
         const opp = await loadOpportunity(tx, auth, params.id);
         if (opp.rowVersion !== body.rowVersion) throw conflict(opp.rowVersion);
         if (TERMINAL_STAGES.includes(opp.stage as (typeof TERMINAL_STAGES)[number])) throw unprocessable('Oportunidade encerrada: os itens não mudam mais.');
+        const contractConsumption = opp.saleKind === 'consumo_contrato';
         if (body.economics) {
           requireAction(auth, 'ver_financeiro', 'Seu perfil não permite alterar os custos da negociação.');
           if (body.economicsUpdatedAt !== undefined) {
@@ -81,11 +82,14 @@ export const opportunityItemRoutes = [
           const errors = econInputErrors(body.economics as EconInput);
           if (errors.length) throw unprocessable(errors.join(' '));
           const version = await econSettingsOf(tx, auth.tenantId);
-          if (version?.settings.netMarginTargetBp == null) throw unprocessable('Configure a margem líquida esperada em Configurações → Viabilidade para salvar os custos.');
-          const targetErrors = econTargetErrors(body.economics as EconInput, version.settings);
-          if (targetErrors.length) throw unprocessable(targetErrors.join(' '));
-          const paybackErrors = econPaybackErrors(body.economics as EconInput, version.settings, await publicSectorOf(tx, opp));
-          if (paybackErrors.length) throw unprocessable(paybackErrors.join(' '));
+          if (!contractConsumption && version?.settings.netMarginTargetBp == null) throw unprocessable('Configure a margem líquida esperada em Configurações → Viabilidade para salvar os custos.');
+          if (!version) throw unprocessable('Parâmetros de viabilidade não encontrados.');
+          if (!contractConsumption) {
+            const targetErrors = econTargetErrors(body.economics as EconInput, version.settings);
+            if (targetErrors.length) throw unprocessable(targetErrors.join(' '));
+            const paybackErrors = econPaybackErrors(body.economics as EconInput, version.settings, await publicSectorOf(tx, opp));
+            if (paybackErrors.length) throw unprocessable(paybackErrors.join(' '));
+          }
         }
         for (const [i, it] of body.items.entries()) {
           it.costProfile = defaultCostProfile(it.dealKind);
@@ -153,7 +157,7 @@ export const opportunityItemRoutes = [
           .where(and(eq(s.opportunities.id, opp.id), eq(s.opportunities.rowVersion, body.rowVersion))).returning({ rowVersion: s.opportunities.rowVersion });
         if (!updated.length) throw conflict(opp.rowVersion);
         if (body.economics) {
-          const input = await learnCostLines(tx, auth.tenantId, auth.userId, await resolveCostLines(tx, auth.tenantId, body.economics as EconInput));
+          const input = contractConsumption ? body.economics as EconInput : await learnCostLines(tx, auth.tenantId, auth.userId, await resolveCostLines(tx, auth.tenantId, body.economics as EconInput));
           const result = await saveEconomics(tx, { ...opp, tenantId: auth.tenantId }, input, auth.userId, 'produtos_e_custos');
           if (!result) throw unprocessable('Parâmetros de viabilidade não encontrados.');
         }

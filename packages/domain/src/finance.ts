@@ -251,6 +251,7 @@ export type EconDecision = {
 };
 
 export type EconResult = {
+  contractConsumption?: import('./contractConsumption').ContractConsumption;
   /** Resultado no preço proposto; sem referência circular, contém apenas o cálculo avaliado. */ proposedResult?: EconResult | null;
   /** viabilidade B2G (produtos do edital × planilha da engenharia), calculada junto e guardada na fotografia */
   b2g?: import('./b2gViability').B2gResult | null;

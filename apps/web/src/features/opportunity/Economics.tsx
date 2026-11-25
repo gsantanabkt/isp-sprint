@@ -21,9 +21,11 @@ import { errMsg } from '../contracts/shared';
 import { BasketPanel, BusinessOverview, ItemValuesModal } from './BasketEconomics';
 import { basketName, parseRate, rateText, type BasketForm } from './basketPresentation';
 import { B2gPanel, emptyB2gForm, type B2gForm } from './B2gPanel';
+import { ContractConsumptionSummary } from './ContractConsumptionSummary';
 import { SectionsEconomics, SectionsSummary } from './DealSections';
 
 type Data = {
+  contractConsumptionMode?: boolean;
   settings: EconSettings | null; items: EconItem[]; publicSector: boolean; input: EconInput; saved: { updatedAt: string } | null;
   /** fórmulas publicadas no Financial Studio (a prévia usa o mesmo modelo do servidor) */
   modelOverrides?: FinOverride[];
@@ -36,7 +38,7 @@ type Data = {
   settingsVersion: { id: string; validFrom: string } | null;
   status: EconStatus; canDecide: boolean; decisions: { id: string; snapshotId: string; action: 'enviada' | 'aprovada' | 'devolvida'; reason: string | null; actorName: string | null; createdAt: string }[];
   /** sem "ver financeiro" a API manda só o veredito */
-  financeHidden: boolean; history: { id: string; reason: string; createdAt: string; actorName: string | null; verdict: EconVerdict; priceCents: number | null; engineVersion: string | null; sha256: string | null }[];
+  financeHidden: boolean; history: { id: string; contractConsumptionMode?: boolean; reason: string; createdAt: string; actorName: string | null; verdict: EconVerdict; priceCents: number | null; engineVersion: string | null; sha256: string | null }[];
 };
 type EconStatus = 'rascunho' | 'calculada' | 'em_decisao' | 'aprovada' | 'devolvida';
 /** Linha do formulário: `unit` = valor unitário digitado; `measure` = unidade de medida (m, und, hh…). */
@@ -477,6 +479,17 @@ export function EconomicsResult({ r, compact = false, settings }: { r: EconResul
 }
 
 const exportHref = (oppId: string, runId: string, format: 'pdf' | 'csv') => `/api/v1/opportunities/${oppId}/economics/runs/${runId}/export?format=${format}`;
+
+function EconomicsHistory({ oppId, history }: { oppId: string; history: Data['history'] }) {
+  if (!history.length) return null;
+  return <details className="text-xs">
+    <summary className="cursor-pointer font-semibold text-ink">Histórico de cálculos ({history.length})</summary>
+    <ul className="mt-2 divide-y divide-line">{history.map((run) => <li key={run.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+      <span>{fmtDateTime(run.createdAt)} · {run.actorName ?? 'sistema'} · {run.contractConsumptionMode ? 'Consumo de contrato' : ECON_VERDICT_LABELS[run.verdict]}</span>
+      <span className="flex gap-3"><a className="text-primary" href={exportHref(oppId, run.id, 'pdf')}>PDF</a><a className="text-primary" href={exportHref(oppId, run.id, 'csv')}>CSV</a>{run.sha256 && <span className="text-success" title={run.sha256}>assinado {run.sha256.slice(0, 8)}</span>}</span>
+    </li>)}</ul>
+  </details>;
+}
 const emitterLine = (e: NonNullable<Data['emitter']>) => [e.name, e.cnpj ? `CNPJ ${e.cnpj.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5')}` : null, e.taxRegime ? TAX_REGIME_LABELS[e.taxRegime as TaxRegime] ?? e.taxRegime : null, e.city ? `${e.city}${e.state ? `/${e.state}` : ''}` : null].filter(Boolean).join(' · ');
 
 /** B2G: formulário ⇄ entrada salva (percentuais em pontos-base; peso em fração; lance em centavos) */
@@ -530,7 +543,7 @@ function DecisionBar({ oppId, d, canSubmit }: { oppId: string; d: Data; canSubmi
   const toast = useToast();
   const [reason, setReason] = useState<string | null>(null);
   const done = (msg: string) => { setReason(null); void qc.invalidateQueries({ queryKey: ['economics', oppId] }); void qc.invalidateQueries({ queryKey: ['econ-pending'] }); toast({ tone: 'success', message: msg }); };
-  const submit = useMutation({ mutationFn: () => api<{ status: string; autoApproved?: boolean }>(`/opportunities/${oppId}/economics/submit`, { method: 'POST', body: {} }), onSuccess: (r) => done(r.autoApproved ? 'Aprovada automaticamente: VPL positivo, TIR acima da TMA, margem e payback na política' : 'Fora das regras automáticas: enviada para a alçada superior'), onError: (e) => toast({ tone: 'error', message: errMsg(e) }) });
+  const submit = useMutation({ mutationFn: () => api<{ status: string; autoApproved?: boolean }>(`/opportunities/${oppId}/economics/submit`, { method: 'POST', body: {} }), onSuccess: (r) => done(r.autoApproved ? 'Aprovada automaticamente: VPL positivo, TIR acima da TMA, margem e payback na política' : d.contractConsumptionMode ? 'Consumo enviado para decisão da gestão' : 'Fora das regras automáticas: enviada para a alçada superior'), onError: (e) => toast({ tone: 'error', message: errMsg(e) }) });
   const decide = useMutation({
     mutationFn: (body: { decision: 'aprovar' | 'devolver'; reason?: string }) => api(`/opportunities/${oppId}/economics/decision`, { method: 'POST', body }),
     onSuccess: (_r, v) => done(v.decision === 'aprovar' ? 'Viabilidade aprovada' : 'Viabilidade devolvida'), onError: (e) => toast({ tone: 'error', message: errMsg(e) }),
@@ -567,6 +580,19 @@ function DecisionBar({ oppId, d, canSubmit }: { oppId: string; d: Data; canSubmi
 export function EconomicsTab(props: { oppId: string; onProducts?: () => void }) {
   const q = useQuery({ queryKey: ['economics', props.oppId], queryFn: () => api<Data>('/opportunities/' + props.oppId + '/economics') });
   const d = q.data;
+  if (d?.contractConsumptionMode) {
+    if (d.financeHidden) return <p className="text-sm text-muted">Valores ocultos para o seu perfil.</p>;
+    const result = d.result?.contractConsumption;
+    return <div className="space-y-4">
+      <h2 className="text-md font-bold text-ink">Viabilidade econômica · Consumo de contrato</h2>
+      {result ? <ContractConsumptionSummary result={result} /> : <Notice tone="info">Informe e salve os valores em Produtos e Serviços para estimar o custo de serviço.</Notice>}
+      {d.stale && d.editable && <Notice tone="warning">Revise os valores em Produtos e Serviços e salve para atualizar a inferência.</Notice>}
+      {d.editable && props.onProducts && <Button onClick={props.onProducts}>Abrir Produtos e Serviços</Button>}
+      {!!result?.groups.length && <DecisionBar oppId={props.oppId} d={d} canSubmit={d.editable && !d.stale && !d.result?.withReservations} />}
+      {result && d.result?.withReservations && <Notice tone="info">Confira os documentos fiscais dos produtos antes de enviar para decisão.</Notice>}
+      <EconomicsHistory oppId={props.oppId} history={d.history} />
+    </div>;
+  }
   if (d?.input?.sections?.length && !d.editable && d.result?.sections) return <div className="space-y-4"><Notice tone="info">Valores da viabilidade salva, em modo de consulta.</Notice><SectionsSummary r={d.result} /></div>;
   if (d?.input?.sections?.length && (d.settings?.netMarginTargetBp == null || !globalInputFromSections(d.input, d.items))) {
     if (d.financeHidden) return <HiddenEconomics d={d} />;
@@ -656,7 +682,7 @@ function GlobalEconomicsTab({ oppId, onProducts }: { oppId: string; onProducts?:
     {d.stale && <Notice tone="warning">Produtos, tributos ou parâmetros mudaram desde o último cálculo salvo. Confira e salve novamente antes de pedir aprovação.</Notice>}
     {outdated && <Notice tone="warning"><p>Outro cálculo foi salvo depois que esta tela foi aberta. Recarregue os valores para preservar as alterações recentes.</p><Button size="sm" onClick={() => setForm(null)}>Recarregar cálculo</Button></Notice>}
     <DecisionBar oppId={oppId} d={d} canSubmit={official && !d.stale && d.editable && !errors.length && views.length > 0 && views.every((v) => v.result.decision?.basis === 'proposto') && !result?.withReservations} />
-    {!!d.history.length && <details className="text-xs"><summary className="cursor-pointer font-semibold text-ink">Histórico de cálculos ({d.history.length})</summary><ul className="mt-2 divide-y divide-line">{d.history.map((h) => <li key={h.id} className="flex flex-wrap items-center justify-between gap-2 py-2"><span>{fmtDateTime(h.createdAt)} · {h.actorName ?? 'sistema'} · {ECON_VERDICT_LABELS[h.verdict]}</span><span className="flex gap-3"><a className="text-primary" href={exportHref(oppId, h.id, 'pdf')}>PDF</a><a className="text-primary" href={exportHref(oppId, h.id, 'csv')}>CSV</a>{h.sha256 && <span className="text-success" title={h.sha256}>assinado {h.sha256.slice(0, 8)}</span>}</span></li>)}</ul></details>}
+    <EconomicsHistory oppId={oppId} history={d.history} />
     {st.netMarginTargetBp == null && <Notice tone="warning">Configure a margem líquida esperada em Configurações → Viabilidade para calcular os preços.</Notice>}
     {!profiles.length && <Notice tone="info">Adicione os produtos e custos em Produtos e serviços. Os blocos aparecem conforme os perfis dos itens.</Notice>}
     <div className="grid items-start gap-4 lg:grid-cols-2">{views.map((view, index) => <BasketPanel key={view.profile} view={view} form={form.baskets[view.profile]} input={input} settings={st} index={index} disabled={!editable} pending={pending} invalid={errors.length > 0} targetInvalid={targetInvalid(view.profile)} onChange={(p) => setBasket(view.profile, p)} onUse={() => setBasket(view.profile, { price: money(view.result.suggestedCents ?? null) })} onAdvanced={() => setAdvancedProfile(view.profile)} onItems={() => setItemsProfile(view.profile)} />)}</div>
@@ -684,7 +710,7 @@ export function EconomicsSummary({ oppId, onOpen }: { oppId: string; onOpen: () 
       </div>
       <p className="mb-2 text-2xs text-muted">Último cálculo salvo ({fmtDateTime(d.saved.updatedAt)}). A aba Viabilidade econômica mostra a simulação ao vivo; salve lá para atualizar este painel.</p>
       {d.stale && <Notice tone="warning">Desatualizada: produtos, tributos, parâmetros ou o motor mudaram depois de salva. Abra e salve de novo.</Notice>}
-      {d.financeHidden ? <HiddenVerdict r={r} /> : r.sections ? <SectionsSummary r={r} /> : <EconomicsResult r={r} compact settings={d.settings} />}
+      {d.contractConsumptionMode ? d.financeHidden ? <p className="text-sm text-muted">Valores ocultos para o seu perfil.</p> : r.contractConsumption ? <ContractConsumptionSummary result={r.contractConsumption} /> : <Notice tone="info">Revise os valores em Produtos e Serviços e salve a inferência.</Notice> : d.financeHidden ? <HiddenVerdict r={r} /> : r.sections ? <SectionsSummary r={r} /> : <EconomicsResult r={r} compact settings={d.settings} />}
     </section>
   );
 }

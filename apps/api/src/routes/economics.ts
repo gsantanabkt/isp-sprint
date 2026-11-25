@@ -246,7 +246,7 @@ export const economicsRoutes = [
       const decision = { status: st.status, decisions: st.decisions.map(({ actorId: _a, ...d }) => d), canDecide: st.status === 'em_decisao' && auth.actions.aprovar_viabilidade && st.submittedBy !== auth.userId };
       if (!auth.actions.ver_financeiro) {
         // sem "ver financeiro": só o veredito; nada de custos, fluxo, TIR, payback, pesos ou taxas
-        return { financeHidden: true, publicSector: ctx.publicSector, saved: ctx.saved, stale, editable: false, history, input: null, items: [], settings: null, settingsVersion: null, branchDocs: [], ...decision, canDecide: false,
+        return { financeHidden: true, contractConsumptionMode: ctx.contractConsumptionMode, publicSector: ctx.publicSector, saved: ctx.saved, stale, editable: false, history, input: null, items: [], settings: null, settingsVersion: null, branchDocs: [], ...decision, canDecide: false,
           result: savedResult ? { verdict: savedResult.verdict, mode: savedResult.mode, withReservations: savedResult.withReservations, withinPolicy: savedResult.withinPolicy } : null };
       }
       return { ...rest, financeHidden: false, result: savedResult, recomendacao_viabilidade: savedResult ? viabilityRecommendationPayload(savedResult.recommendation, savedResult.mode) : null, stale, history, editable: open, ...decision };
@@ -267,13 +267,14 @@ export const economicsRoutes = [
       const e = [...econInputErrors(body as EconInput), ...(body.pricingMode !== 'global' ? sectionErrors((body.sections ?? []) as never) : [])];
       if (e.length) throw unprocessable(e.join(' '));
       const pricingSettings = await econSettingsOf(tx, auth.tenantId);
-      const targetErrors = pricingSettings ? econTargetErrors(body as EconInput, pricingSettings.settings) : [];
+      const contractConsumption = opp.saleKind === 'consumo_contrato';
+      const targetErrors = pricingSettings && !contractConsumption ? econTargetErrors(body as EconInput, pricingSettings.settings) : [];
       if (targetErrors.length) throw unprocessable(targetErrors.join(' '));
-      const paybackErrors = pricingSettings ? econPaybackErrors(body as EconInput, pricingSettings.settings, await publicSectorOf(tx, opp)) : [];
+      const paybackErrors = pricingSettings && !contractConsumption ? econPaybackErrors(body as EconInput, pricingSettings.settings, await publicSectorOf(tx, opp)) : [];
       if (paybackErrors.length) throw unprocessable(paybackErrors.join(' '));
-      if (pricingSettings?.settings.netMarginTargetBp == null && !(body.sections?.length && body.pricingMode !== 'global')) throw unprocessable('Configure a margem líquida esperada em Configurações → Viabilidade para calcular o preço.');
+      if (!contractConsumption && pricingSettings?.settings.netMarginTargetBp == null && !(body.sections?.length && body.pricingMode !== 'global')) throw unprocessable('Configure a margem líquida esperada em Configurações → Viabilidade para calcular o preço.');
       // planilha: confere o catálogo e aprende os itens pela descrição + unidade (impacto e preço da cotação)
-      const input = body.sections?.length && body.pricingMode !== 'global'
+      const input = contractConsumption ? body as EconInput : body.sections?.length && body.pricingMode !== 'global'
         ? await catalogSectionCosts(tx, auth.tenantId, auth.userId, { ...(body as EconInput), capex: [], opex: [], extraInitialCents: 0 })
         : await learnCostLines(tx, auth.tenantId, auth.userId, await resolveCostLines(tx, auth.tenantId, body as EconInput));
       const result = await saveEconomics(tx, { ...opp, tenantId: auth.tenantId }, input, auth.userId);
@@ -318,7 +319,7 @@ export const economicsRoutes = [
       if (TERMINAL_STAGES.includes(opp.stage as (typeof TERMINAL_STAGES)[number])) throw unprocessable('Oportunidade encerrada.');
       const ctx = await economicsContext(app.db, { ...opp, tenantId: auth.tenantId });
       if (!ctx.savedResult) throw unprocessable('Salve a viabilidade econômica antes de enviar.');
-      if (ctx.input.pricingMode === 'global' && ctx.settings && econBasketViews(ctx.input, ctx.items, ctx.settings, ctx.savedResult).some((v) => v.result.decision?.basis !== 'proposto')) throw unprocessable('Defina ou adote o preço global de cada cesta e salve antes de enviar para decisão.');
+      if (!ctx.contractConsumptionMode && ctx.input.pricingMode === 'global' && ctx.settings && econBasketViews(ctx.input, ctx.items, ctx.settings, ctx.savedResult).some((v) => v.result.decision?.basis !== 'proposto')) throw unprocessable('Defina ou adote o preço global de cada cesta e salve antes de enviar para decisão.');
       if (ctx.savedResult.priceSource === 'sugerido') throw unprocessable('Os produtos estão sem preço: defina o preço (nos produtos ou no campo Preço da viabilidade) e salve antes de enviar.');
       assertDecidable(ctx);
       const st = await econStatus(app.db, auth.tenantId, opp.id);
@@ -359,7 +360,7 @@ export const economicsRoutes = [
         .from(s.opportunities).innerJoin(s.contacts, eq(s.contacts.id, s.opportunities.contactId)).innerJoin(s.opportunityEconomics, eq(s.opportunityEconomics.opportunityId, s.opportunities.id))
         .where(and(oppVisibility(auth), inArray(s.opportunities.id, sent.map((x) => x.id))));
       const pend = await pendingDecisions(app.db, auth.tenantId, opps.map((o) => o.id));
-      return { items: pend.map((p) => { const o = opps.find((x) => x.id === p.opportunityId)!; const r = o.result as unknown as EconResult; return { ...p, code: o.code, title: o.title, account: o.account, verdict: r.verdict, priceCents: r.priceCents, mode: r.mode, paybackMonths: r.kpi?.paybackMonths ?? null, marginPct: r.kpi?.marginPct ?? null, mine: p.submittedBy === auth.userId }; }) };
+      return { items: pend.map((p) => { const o = opps.find((x) => x.id === p.opportunityId)!; const r = o.result as unknown as EconResult; return { ...p, code: o.code, title: o.title, account: o.account, ...(r.contractConsumption ? { contractConsumptionMode: true } : {}), verdict: r.verdict, priceCents: r.priceCents, mode: r.mode, paybackMonths: r.kpi?.paybackMonths ?? null, marginPct: r.kpi?.marginPct ?? null, mine: p.submittedBy === auth.userId }; }) };
     },
   }),
 ];
@@ -371,5 +372,6 @@ function assertDecidable(ctx: EconContext) {
   const fresh = computeEconomics(ctx);
   if (!fresh) throw unprocessable(NO_SETTINGS);
   if (isStale(ctx.savedResult!, fresh)) throw unprocessable('A viabilidade mudou desde que foi salva (produtos, tributos ou parâmetros). Abra a aba Viabilidade econômica, confira e salve de novo.');
+  if (fresh.contractConsumption && !fresh.contractConsumption.groups.length) throw unprocessable('Informe os itens para consumo do contrato antes de enviar para decisão.');
   if (fresh.withReservations) throw unprocessable('Todos os produtos precisam de documento fiscal com tributos vigentes cadastrados na filial (Configurações → Filiais e documentos fiscais).');
 }

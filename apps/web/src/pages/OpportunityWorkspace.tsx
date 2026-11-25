@@ -650,7 +650,13 @@ export function OpportunityWorkspacePage() {
   });
   const setKind = useMutation({
     mutationFn: (saleKind: string) => api<Opportunity>(`/opportunities/${id}`, { method: 'PATCH', body: { saleKind: saleKind || null, rowVersion: (a.base ?? q.data)!.rowVersion } }),
-    onSuccess: (o) => { qc.setQueryData(['opportunity', o.id], o); qc.invalidateQueries({ queryKey: ['timeline', o.id] }); toast({ tone: 'success', message: 'Tipo de venda alterado' }); },
+    onSuccess: (o) => {
+      const consumptionChanged = (q.data?.saleKind === 'consumo_contrato') !== (o.saleKind === 'consumo_contrato');
+      qc.setQueryData(['opportunity', o.id], o);
+      void qc.invalidateQueries({ queryKey: ['timeline', o.id] });
+      if (consumptionChanged) void qc.invalidateQueries({ queryKey: ['economics', o.id] });
+      toast({ tone: 'success', message: consumptionChanged ? 'Tipo de venda alterado. Revise os valores em Produtos e Serviços.' : 'Tipo de venda alterado' });
+    },
     onError: (e) => toast({ tone: 'error', message: (e as Error).message }),
   });
   const move = useMutation({
