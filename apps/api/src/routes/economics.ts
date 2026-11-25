@@ -8,7 +8,7 @@ import { conflict, forbidden, notFound, unprocessable } from '../http/errors';
 import * as s from '../db/schema';
 import { audit } from '../services/audit';
 import { loadOpportunity, oppVisibility } from '../services/opportunities';
-import { catalogSectionCosts, publicSectorOf, computeEconomics, costItemsOf, economicsRun, econSettingsHistory, econSettingsOf, econStatus, economicsContext, economicsHistory, fiscalDocsOf, isStale, pendingDecisions, recordFiscalDocVersion, learnCostLines, resolveCostLines, saveEconomics, today, type EconContext } from '../services/economics';
+import { catalogSectionCosts, publicSectorOf, computeEconomics, costItemsOf, economicsRun, econSettingsHistory, econSettingsOf, econStatus, economicsContext, economicsHistory, fiscalDocsOf, isStale, pendingDecisions, recordFiscalDocVersion, learnCostLines, resolveCostLines, saveEconomics, saveEconomicsDraft, today, type EconContext } from '../services/economics';
 import { requireAction } from '../services/modules';
 import { buildEconCsv, buildEconPdf, econFileName, letterheadMime, letterheadSample } from '../services/economicsExport';
 
@@ -240,10 +240,10 @@ export const economicsRoutes = [
       const ctx = await economicsContext(app.db, { ...opp, tenantId: auth.tenantId });
       const { savedResult, model: _model, ...rest } = ctx;
       // "stale" só avisa que itens, tributos, parâmetros ou o motor mudaram desde o salvo; nada é gravado
-      const stale = savedResult ? isStale(savedResult, computeEconomics(ctx)) : false;
+      const stale = savedResult ? isStale(savedResult, computeEconomics(ctx)) : !!ctx.saved;
       const [history, st] = await Promise.all([economicsHistory(app.db, auth.tenantId, opp.id), econStatus(app.db, auth.tenantId, opp.id)]);
       const open = !TERMINAL_STAGES.includes(opp.stage as (typeof TERMINAL_STAGES)[number]);
-      const decision = { status: st.status, decisions: st.decisions.map(({ actorId: _a, ...d }) => d), canDecide: st.status === 'em_decisao' && auth.actions.aprovar_viabilidade && st.submittedBy !== auth.userId };
+      const decision = { status: savedResult ? st.status : 'rascunho', decisions: st.decisions.map(({ actorId: _a, ...d }) => d), canDecide: !!savedResult && st.status === 'em_decisao' && auth.actions.aprovar_viabilidade && st.submittedBy !== auth.userId };
       if (!auth.actions.ver_financeiro) {
         // sem "ver financeiro": só o veredito; nada de custos, fluxo, TIR, payback, pesos ou taxas
         return { financeHidden: true, contractConsumptionMode: ctx.contractConsumptionMode, publicSector: ctx.publicSector, saved: ctx.saved, stale, editable: false, history, input: null, items: [], settings: null, settingsVersion: null, branchDocs: [], ...decision, canDecide: false,
@@ -267,6 +267,10 @@ export const economicsRoutes = [
       const e = [...econInputErrors(body as EconInput), ...(body.pricingMode !== 'global' ? sectionErrors((body.sections ?? []) as never) : [])];
       if (e.length) throw unprocessable(e.join(' '));
       const pricingSettings = await econSettingsOf(tx, auth.tenantId);
+      if (!pricingSettings && Array.isArray(body.sections) && body.pricingMode !== 'global') {
+        await saveEconomicsDraft(tx, { ...opp, tenantId: auth.tenantId }, body as EconInput, auth.userId);
+        return { result: null, recomendacao_viabilidade: null, history: await economicsHistory(tx, auth.tenantId, opp.id) };
+      }
       const contractConsumption = opp.saleKind === 'consumo_contrato';
       const targetErrors = pricingSettings && !contractConsumption ? econTargetErrors(body as EconInput, pricingSettings.settings) : [];
       if (targetErrors.length) throw unprocessable(targetErrors.join(' '));
@@ -360,7 +364,7 @@ export const economicsRoutes = [
         .from(s.opportunities).innerJoin(s.contacts, eq(s.contacts.id, s.opportunities.contactId)).innerJoin(s.opportunityEconomics, eq(s.opportunityEconomics.opportunityId, s.opportunities.id))
         .where(and(oppVisibility(auth), inArray(s.opportunities.id, sent.map((x) => x.id))));
       const pend = await pendingDecisions(app.db, auth.tenantId, opps.map((o) => o.id));
-      return { items: pend.map((p) => { const o = opps.find((x) => x.id === p.opportunityId)!; const r = o.result as unknown as EconResult; return { ...p, code: o.code, title: o.title, account: o.account, ...(r.contractConsumption ? { contractConsumptionMode: true } : {}), verdict: r.verdict, priceCents: r.priceCents, mode: r.mode, paybackMonths: r.kpi?.paybackMonths ?? null, marginPct: r.kpi?.marginPct ?? null, mine: p.submittedBy === auth.userId }; }) };
+      return { items: pend.filter((p) => opps.some((o) => o.id === p.opportunityId && o.result != null)).map((p) => { const o = opps.find((x) => x.id === p.opportunityId)!; const r = o.result as unknown as EconResult; return { ...p, code: o.code, title: o.title, account: o.account, ...(r.contractConsumption ? { contractConsumptionMode: true } : {}), verdict: r.verdict, priceCents: r.priceCents, mode: r.mode, paybackMonths: r.kpi?.paybackMonths ?? null, marginPct: r.kpi?.marginPct ?? null, mine: p.submittedBy === auth.userId }; }) };
     },
   }),
 ];
@@ -371,7 +375,7 @@ const NO_SETTINGS = 'A empresa ainda não informou os parâmetros da viabilidade
 function assertDecidable(ctx: EconContext) {
   const fresh = computeEconomics(ctx);
   if (!fresh) throw unprocessable(NO_SETTINGS);
-  if (isStale(ctx.savedResult!, fresh)) throw unprocessable('A viabilidade mudou desde que foi salva (produtos, tributos ou parâmetros). Abra a aba Viabilidade econômica, confira e salve de novo.');
+  if (!ctx.savedResult || isStale(ctx.savedResult, fresh)) throw unprocessable('A viabilidade mudou desde que foi salva (produtos, tributos ou parâmetros). Abra a aba Viabilidade econômica, confira e salve de novo.');
   if (fresh.contractConsumption && !fresh.contractConsumption.groups.length) throw unprocessable('Informe os itens para consumo do contrato antes de enviar para decisão.');
   if (fresh.withReservations) throw unprocessable('Todos os produtos precisam de documento fiscal com tributos vigentes cadastrados na filial (Configurações → Filiais e documentos fiscais).');
 }

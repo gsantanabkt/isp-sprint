@@ -14,6 +14,8 @@ Ao adicionar um tipo de negócio em **Produtos e Serviços**, o usuário escolhe
 
 ## Implementação
 
+- **Custos e itens de consumo.** Podem ser editados e salvos com permissão financeira antes de configurar a viabilidade. Sem parâmetros suficientes, são rascunho, sem cálculo, fotografia ou envio para aprovação.
+
 - O servidor seleciona a regra pelo `saleKind` da oportunidade. A prévia em Produtos e Serviços e o salvamento usam a mesma função de domínio. O motor de formação de preço continua no caminho aplicado aos demais tipos de venda.
 - A função mantém os subtotais conforme a coluna **Quando** e calcula a inferência sobre as linhas elegíveis de valor único, como na base de investimento do motor existente. Entrega e taxas fixas ficam fora da base. A inferência é pontual para Instalação e mensal para Recorrência e Aluguel. A taxa vigente pode ser zero, com 35% de fallback para versões antigas.
 - O salvamento preserva a entrada, sem aprendizado de preço no catálogo de custos e sem sincronização automática com a grade superior de preços da proposta. O cálculo usa os campos já persistidos, inclusive para o editor por seções. As fotografias são identificadas por `CONTRACT-CONSUMPTION-1`, com histórico e exportação em CSV e PDF.

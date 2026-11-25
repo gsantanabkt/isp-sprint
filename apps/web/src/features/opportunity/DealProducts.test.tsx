@@ -16,7 +16,7 @@ const clients: QueryClient[] = [];
 afterEach(() => { cleanup(); clients.splice(0).forEach((c) => c.clear()); vi.mocked(api).mockReset(); toast.mockReset(); setMoneyHidden(true); });
 const kinds = ['venda', 'servico', 'recorrencia', 'locacao'] as const;
 const initial: EconInput = { ...emptyEconInput(), paybackMonths: 6, b2g: { netTargetBp: 3000 }, capex: kinds.map((kind) => ({ description: 'Investimento ' + kind, qtyMilli: 1000, unitCents: 800000, kind, impact: 'material' })), opex: [{ description: 'Operação recorrente', qtyMilli: 1000, unitCents: 10000, kind: 'recorrencia', impact: 'operacional' }] };
-function setup(hidden = false, onlyMonthly = false, bid = false, saleKind?: Opportunity['saleKind']) {
+function setup(hidden = false, onlyMonthly = false, bid = false, saleKind?: Opportunity['saleKind'], noSettings = false) {
   const requests: { items: { dealKind: string; priceDefined: boolean; unitCents: number }[]; economics?: EconInput; bidMode?: string; bidGlobalCents?: number }[] = [];
   const selected = onlyMonthly ? kinds.filter((k) => k === 'recorrencia') : kinds;
   const items = selected.map((dealKind, position) => ({ id: String(position), description: 'Produto ' + dealKind, unit: 'un', qtyMilli: 1000, unitCents: 0, priceDefined: false, discountCents: 0, surchargeCents: 0, notes: null, bidUnitCents: null, fiscalDocTypeId: 'doc', dealKind }));
@@ -25,7 +25,7 @@ function setup(hidden = false, onlyMonthly = false, bid = false, saleKind?: Oppo
   vi.mocked(api).mockImplementation(async (url, options) => {
     if (options?.method === 'PUT') { requests.push(options.body as never); return { id: 'opp', rowVersion: 2 } as never; }
     if (url.endsWith('/items')) return { items, editable: true, rowVersion: 1, bid } as never;
-    if (url.endsWith('/economics')) return { input: hidden ? null : input, editable: !hidden, financeHidden: hidden, settings: hidden ? null : settings, publicSector: false } as never;
+    if (url.endsWith('/economics')) return { input: hidden ? null : input, editable: !hidden, financeHidden: hidden, settings: hidden || noSettings ? null : settings, publicSector: false } as never;
     if (url === '/fiscal-docs') return { items: [{ id: 'doc', branchId: 'branch', fiscalKind: 'servico', code: 'NFS-E', name: 'Serviço', rates: { percentBp: 1000, fixedCents: 0, complete: true } }] } as never;
     return { items: [] } as never;
   });
@@ -34,6 +34,17 @@ function setup(hidden = false, onlyMonthly = false, bid = false, saleKind?: Oppo
   return requests;
 }
 describe('produtos e custos por tipo de negócio', () => {
+  it('permite lançar e salvar custos antes de configurar a viabilidade', async () => {
+    const requests = setup(false, true, false, 'venda_consultiva', true);
+    const recurrence = await screen.findByRole('region', { name: 'Negociação Recorrência' });
+    expect(within(recurrence).getByRole('button', { name: 'Adicionar custo' })).toBeTruthy();
+    expect(within(recurrence).getByRole('button', { name: 'Colar do Excel' })).toBeTruthy();
+    expect(within(recurrence).getByLabelText('Importar custos de Recorrência')).toBeTruthy();
+    fireEvent.change(within(recurrence).getByLabelText('Valor unitário do custo 1'), { target: { value: '200,00' } });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Salvar produtos e custos' })[0]!);
+    await waitFor(() => expect(requests[0]?.economics?.capex[0]?.unitCents).toBe(20000));
+    expect(screen.queryByText('Preço sugerido da cesta')).toBeNull();
+  });
   it('mostra e salva o preço aceito no Consumo de contrato, com inferência só no serviço', async () => {
     setMoneyHidden(false);
     const requests = setup(false, false, false, 'consumo_contrato');

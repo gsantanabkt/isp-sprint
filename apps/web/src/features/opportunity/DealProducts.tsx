@@ -70,7 +70,8 @@ export function DealProducts({ opp }: { opp: Opportunity }) {
   }, [itemsQ.data, econQ.data, form]);
   const [saving, setSaving] = useState(false);
   const editable = !!itemsQ.data?.editable && !saving;
-  const costsEditable = editable && !!econQ.data?.editable && !!econQ.data.settings;
+  const costsEditable = finance && editable && !!econQ.data?.editable;
+  const canCalculate = !!econQ.data?.settings && (consumption || econQ.data.settings.netMarginTargetBp != null);
   const dirty = !!form && formKey(form) !== base;
   const parsed = useMemo(() => form?.items.filter((r) => r.description.trim()).map(itemInput) ?? [], [form?.items]);
   const input = useMemo(() => form ? costsInput({ ...form.input, mode: form.kinds.length ? (form.kinds.some(isMonthlyKind) ? 'recorrente' : 'pontual') : form.input.mode, extraInitialCents: parseMoney(form.extra) ?? -1 }, form.costs) : emptyEconInput(), [form]);
@@ -84,9 +85,9 @@ export function DealProducts({ opp }: { opp: Opportunity }) {
     return () => clearTimeout(handle);
   }, [finance, form, input, parsed, docsQ.data, consumption]);
   const preview = useMemo<EconResult | null>(() => {
-    if (consumption || !calculation || !econQ.data?.settings || calculation.items.some((i) => i.revenueCents < 0)) return null;
+    if (consumption || !canCalculate || !calculation || !econQ.data?.settings || calculation.items.some((i) => i.revenueCents < 0)) return null;
     try { return financeEngine({ ...calculation, settings: econQ.data.settings, publicSector: econQ.data.publicSector, fiscal: econQ.data.fiscal, model: buildModel(econQ.data.modelOverrides ?? []) }); } catch { return null; }
-  }, [calculation, econQ.data, consumption]);
+  }, [calculation, econQ.data, consumption, canCalculate]);
   const consumptionPreview = consumption && finance && econQ.data?.settings && form
     && !form.costs.some((c) => (c.description.trim() || c.value.trim()) && (!c.value.trim() || !costQty(c.quantity) || parseMoney(c.value) == null))
     ? contractConsumption(input, parsed.map((i) => ({ kind: i.dealKind, section: i.section })), econQ.data.settings) : null;
@@ -108,7 +109,7 @@ export function DealProducts({ opp }: { opp: Opportunity }) {
     onSuccess: async (o, draft) => {
       qc.setQueryData(['opportunity', o.id], o); setBase(formKey(draft.form));
       await Promise.all([['opp-items', opp.id], ['economics', opp.id], ['product-catalog'], ['cost-items'], ['timeline', opp.id]].map((queryKey) => qc.invalidateQueries({ queryKey }))).then(() => setForm(null));
-      toast({ tone: 'success', message: econQ.data?.settings && finance ? (consumption ? 'Produtos e consumo salvos' : 'Produtos e custos salvos') : 'Produtos e serviços salvos' });
+      toast({ tone: 'success', message: draft.canSaveCosts ? (consumption ? 'Produtos e consumo salvos' : 'Produtos e custos salvos') : 'Produtos e serviços salvos' });
     },
     onError: (e) => toast({ tone: 'error', message: e instanceof ApiError && e.status === 409 ? 'A oportunidade mudou. Recarregue os dados antes de salvar.' : errMsg(e) }),
   });
@@ -129,11 +130,11 @@ export function DealProducts({ opp }: { opp: Opportunity }) {
     patch({ items: [...form.items, ...result.items.map((i) => ({ ...toRow(i as SavedItem), kind, doc: suggestDoc(kind) }))] });
     setMessage(result.items.length + ' produto(s) incluído(s).' + (result.errors.length ? ' Linhas ignoradas: ' + result.errors.map((e) => e.row + ': ' + e.message).join('; ') : '') + ' Confira e salve.');
   };
-  const saveButton = <Button variant="primary" disabled={(!dirty && !(consumption && econQ.data.stale && costsEditable)) || (finance && costsEditable && !econQ.data.settings)} loading={save.isPending} onClick={() => save.mutate({ form, rowVersion: itemsQ.data!.rowVersion, canSaveCosts: finance && !!econQ.data?.settings && !!econQ.data.editable && !!itemsQ.data?.editable, economicsUpdatedAt: econQ.data?.saved?.updatedAt ?? null, bid: itemsQ.data!.bid })}>{consumption ? 'Salvar produtos e consumo' : 'Salvar produtos e custos'}</Button>;
+  const saveButton = <Button variant="primary" disabled={!dirty && !(canCalculate && econQ.data.stale && costsEditable)} loading={save.isPending} onClick={() => save.mutate({ form, rowVersion: itemsQ.data!.rowVersion, canSaveCosts: costsEditable, economicsUpdatedAt: econQ.data?.saved?.updatedAt ?? null, bid: itemsQ.data!.bid })}>{consumption ? 'Salvar produtos e consumo' : 'Salvar produtos e custos'}</Button>;
   return <section aria-label="Produtos e serviços" className="space-y-4">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-md font-bold text-ink">Produtos e serviços</h2><p className="max-w-2xl text-sm text-muted">Separe a negociação por tipo de negócio. Em cada um, os produtos e os custos usados na viabilidade econômica.</p></div>{editable && saveButton}</div>
     {message && <Notice tone="info">{message}</Notice>}
-    {finance && !econQ.data.settings && <Notice tone="warning">Os produtos podem ser salvos. Configure os parâmetros em Configurações → Viabilidade para editar custos e calcular a viabilidade.</Notice>}
+    {finance && !canCalculate && <Notice tone="warning">Os lançamentos podem ser editados e salvos. Para calcular a viabilidade, configure os parâmetros em Configurações → Viabilidade.</Notice>}
     {form.kinds.map((kind, index) => {
       const monthly = isMonthlyKind(kind), rows = form.items.filter((r) => r.kind === kind), showValues = values[kind] ?? itemsQ.data!.bid;
       const result = preview?.deal?.cells.find((c) => c.lot === lotOfKind(kind))?.result ?? (!preview?.deal ? preview : null);

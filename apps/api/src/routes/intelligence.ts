@@ -37,7 +37,7 @@ export const intelligenceRoutes = [
         .where(and(oppScopeFor(auth, 'inteligencia'), eq(s.opportunityEconomics.tenantId, auth.tenantId), ne(s.opportunities.stage, 'perdida'),
           ...(query.status === 'ganhas' ? [eq(s.opportunities.stage, 'ganha')] : query.status === 'andamento' ? [ne(s.opportunities.stage, 'ganha')] : [])));
       const now = month(new Date());
-      const items = rows.map((r) => {
+      const items = rows.filter((r) => r.result != null).map((r) => {
         const e = r.result as unknown as EconResult;
         return {
           id: r.id, code: r.code, title: r.title, account: r.account, won: r.stage === 'ganha', startMonth: r.wonAt ? month(r.wonAt) : now,

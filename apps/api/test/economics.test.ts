@@ -14,6 +14,21 @@ beforeAll(async () => { ctx = await makeApp(); [carlos, lucas, rafael] = await P
 afterAll(async () => ctx.close());
 
 describe('viabilidade econômica', () => {
+  it('salva e reabre lançamentos como rascunho antes de publicar os parâmetros', async () => {
+    const lk = ok(await carlos.get('/meta/lookups')).json();
+    const corp = lk.pipelines.find((p: { key: string }) => p.key === 'empresarial');
+    const economics = { ...emptyEconInput(), capex: [{ description: 'Cabo para implantação', kind: 'recorrencia', qtyMilli: 5000, unitCents: 20000, impact: 'material' }] };
+    for (const saleKind of ['venda_consultiva', 'consumo_contrato']) {
+      const opp = ok(await carlos.post('/opportunities', {
+        newContact: { name: `Rascunho ${saleKind}`, segment: 'empresarial' }, pipelineId: corp.id, branchId: lk.branches[0].id, saleKind,
+      }), 201).json();
+      ok(await carlos.put(`/opportunities/${opp.id}/items`, { rowVersion: opp.rowVersion, items: [], economics, economicsUpdatedAt: null }));
+      const draft = ok(await carlos.get(`/opportunities/${opp.id}/economics`)).json();
+      expect(draft).toMatchObject({ settings: null, status: 'rascunho', result: null, history: [], input: { capex: economics.capex } });
+      ok(await carlos.post(`/opportunities/${opp.id}/economics/submit`, {}), 422);
+    }
+  });
+
   it('salva e reabre Consumo de contrato sem reprecificar nem cadastrar o preço como custo', async () => {
     ok(await carlos.post('/admin/viability/econ', { ...ECON, serviceCostBp: 2500 }), 201);
     const lk = ok(await carlos.get('/meta/lookups')).json();

@@ -156,7 +156,7 @@ export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
       const o = await api<Opportunity>(`/opportunities/${opp.id}/items`, { method: 'PUT', body: { rowVersion: itemsQ.data!.rowVersion, items } });
       qc.setQueryData(['opportunity', o.id], o);
       let econSaved = false;
-      if (finance && econ.data?.settings) {
+      if (finance && econ.data?.editable) {
         const inp = econ.data.input;
         await api(`/opportunities/${opp.id}/economics`, { method: 'PUT', body: { mode: fs.some((f) => isMonthlySection(f.kind)) ? 'recorrente' : 'pontual', termMonths: 12, receiveMonth: 0, capex: [], extraInitialCents: 0, opex: [], commissionBp: null, lossBp: inp.lossBp ?? null, variableBp: inp.variableBp ?? null, marginTargetBp: null, paybackMonths: null, priceCents: null, salePriceCents: null, fiscalYear: inp.fiscalYear ?? null, b2g: null, sections: toSections(fs) } });
         econSaved = true;
@@ -190,7 +190,7 @@ export function DealSectionsEditor({ opp }: { opp: Opportunity }) {
         </div>
         {editable && <Button variant="primary" disabled={!dirty && !(consumption && finance && econ.data?.stale && econ.data.settings)} loading={save.isPending} onClick={() => save.mutate()}>Salvar produtos e custos</Button>}
       </div>
-      {finance && econ.data && !econ.data.settings && <Notice tone="warning">A empresa ainda não informou os parâmetros da viabilidade (Configurações → Viabilidade): os produtos são salvos, os custos e o cálculo esperam os parâmetros.</Notice>}
+      {finance && econ.data && !econ.data.settings && <Notice tone="warning">A empresa ainda não informou os parâmetros da viabilidade (Configurações → Viabilidade): os lançamentos podem ser salvos. O cálculo espera os parâmetros.</Notice>}
 
       {form.map((f, si) => {
         const out: SectionOutcome | undefined = outcomes[si];

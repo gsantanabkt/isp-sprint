@@ -116,7 +116,7 @@ export async function economicsContext(db: DbOrTx, opp: Opp) {
     items: econItems, publicSector, input, contractConsumptionMode: opp.saleKind === 'consumo_contrato',
     /** emitente: a filial da venda com CNPJ, regime e município (contexto fiscal) */
     emitter: branch ?? null,
-    saved: saved ? { updatedAt: saved.updatedAt, updatedBy: saved.updatedBy } : null, savedResult: saved ? (saved.result as unknown as EconResult) : null,
+    saved: saved ? { updatedAt: saved.updatedAt, updatedBy: saved.updatedBy } : null, savedResult: saved ? (saved.result as unknown as EconResult | null) : null,
     branchDocs: docs.filter((d) => d.active && (!opp.branchId || d.branchId === opp.branchId)),
     /** modelo de fórmulas vigente (Financial Studio): padrão do sistema + fórmulas publicadas */
     model: fm.model, modelOverrides: fm.overrides,
@@ -167,6 +167,12 @@ export function isStale(saved: EconResult, fresh: EconResult | null) {
     || (saved.decision?.paybackMonths ?? null) !== (fresh.decision?.paybackMonths ?? null) || (saved.suggestedCents ?? null) !== (fresh.suggestedCents ?? null);
 }
 
+export async function saveEconomicsDraft(db: DbOrTx, opp: Opp, input: EconInput, updatedBy: string) {
+  const values = { input, result: sql`'null'::jsonb`, updatedBy, updatedAt: new Date() };
+  await db.insert(s.opportunityEconomics).values({ opportunityId: opp.id, tenantId: opp.tenantId, ...values })
+    .onConflictDoUpdate({ target: s.opportunityEconomics.opportunityId, set: values });
+}
+
 /** Guarda entradas e resultado e tira a fotografia auditável (entradas, parâmetros com a versão, tributos e avisos da época). */
 export async function saveEconomics(db: DbOrTx, opp: Opp, input: EconInput, actorId: string | null, reason = 'salvo') {
   const ctx = await economicsContext(db, opp);
@@ -184,8 +190,8 @@ export async function saveEconomics(db: DbOrTx, opp: Opp, input: EconInput, acto
 
 /** Na venda fechada, a fotografia do dia do fechamento (só quando a viabilidade econômica foi preenchida). */
 export async function snapshotEconomicsOnWon(db: DbOrTx, opp: Opp, actorId: string | null) {
-  const [saved] = await db.select({ input: s.opportunityEconomics.input }).from(s.opportunityEconomics).where(eq(s.opportunityEconomics.opportunityId, opp.id)).limit(1);
-  if (!saved) return null;
+  const [saved] = await db.select({ input: s.opportunityEconomics.input, result: s.opportunityEconomics.result }).from(s.opportunityEconomics).where(eq(s.opportunityEconomics.opportunityId, opp.id)).limit(1);
+  if (!saved?.result) return null;
   return saveEconomics(db, opp, { ...emptyEconInput(), ...(saved.input as Partial<EconInput>) } as EconInput, actorId, 'ganha');
 }
 
